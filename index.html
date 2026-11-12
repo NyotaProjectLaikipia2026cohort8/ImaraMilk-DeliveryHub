@@ -340,6 +340,7 @@ const CONFIG={API_BASE:"https://script.google.com/macros/s/AKfycbz4yc4PzpyN0I1LV
 const state={
   orders:[],
   customers:[],
+  locations:[],
   conversations:[],
   messages:{},
   selectedConversation:null,
@@ -378,65 +379,203 @@ function callServer(action,payload={}){
 }
 function normalizeOrder(o){return {id:o.OrderID??o.orderId??o.id??"",customerName:o.CustomerName??o.customerName??"",phone:o.Phone??o.phone??"",address:o.Address??o.address??"",quantity:Number(o.Quantity??o.quantity??0),total:Number(o.Total??o.total??(Number(o.Quantity??o.quantity??0)*Number(o.Price??o.price??0))),status:o.Status??o.status??"Pending",updatedAt:o.CreatedAt??o.updatedAt??"",lat:Number(o.Latitude??o.latitude??o.lat),lon:Number(o.Longitude??o.longitude??o.lon)}}
 
-async function loadData() {
-  document.body.classList.add("loading");
+state.orders = (d.orders || []).map(normalizeOrder);
 
-  try {
-    const d = await callServer("bootstrap");
+state.customers = d.customers || [];
 
-    state.orders = (d.orders || []).map(normalizeOrder);
-    state.customers = d.customers || [];
-    state.conversations = d.conversations || [];
-    state.messages = d.messages || {};
+state.locations = (d.locations || []).map(location => ({
+  locationId: String(location.LocationID || ""),
+  customerId: String(location.CustomerID || ""),
+  customerName: String(location.CustomerName || ""),
+  phone: String(location.Phone || ""),
+  email: String(location.Email || ""),
+  address: String(location.Address || ""),
+  label: String(location.Label || ""),
+  lat: Number(location.Latitude),
+  lon: Number(location.Longitude),
+  isPrimary: location.IsPrimary === true ||
+    String(location.IsPrimary).toLowerCase() === "true"
+}));
 
-    // Fallback: display registered customers even if the
-    // backend conversation directory has not been deployed.
-    if (!state.conversations.length && state.customers.length) {
-      state.conversations = state.customers.map(customer => ({
-        id: String(customer.CustomerID),
-        customerId: String(customer.CustomerID),
-        customerName: customer.FullName || "",
-        phone: customer.Phone || "",
-        status: customer.AccountStatus || "Active",
-        orderId: "",
-        lastMessage: "Start a conversation",
-        lastMessageTime: "",
-        unreadCount: 0
-      }));
-    }
+state.conversations = d.conversations || [];
+state.messages = d.messages || {};
+state.locations = [];
+// First: create or retrieve the customer.
+const customerResult = await callServer("createCustomer", {
+  FullName: customerName,
+  Phone: phone,
+  Email: email
+});
 
-    setConnection(true);
+const customer = customerResult.customer;
 
-  } catch (error) {
-    console.error(error);
-
-    state.orders = [];
-    state.customers = [];
-    state.conversations = [];
-    state.messages = {};
-
-    setConnection(false);
-    toast("Live data unavailable.");
-  } finally {
-    document.body.classList.remove("loading");
-    renderAll();
-  }
+if (!customer || !customer.CustomerID) {
+  throw new Error("Customer profile was not saved.");
 }
 
+// Second: save the primary delivery location.
+const locationResult = await callServer("savePrimaryLocation", {
+  CustomerID: customer.CustomerID,
+  Address: address,
+  Latitude: latitude,
+  Longitude: longitude,
+  Label: "Primary delivery location"
+});
+
+if (!locationResult.success) {
+  throw new Error("Customer was saved, but the location could not be saved.");
+}
+
+// Finally: reload the database and map.
+await loadData();
+
+toast("Customer and primary location saved successfully.");
 function renderAll(){renderStats();renderMapMarkers();renderRecent();renderOrders();renderConversations();if(state.selectedConversation)selectConversation(state.selectedConversation,false)}
 function renderStats(){const a=state.orders;$("#statTotal").textContent=a.length;$("#statPending").textContent=a.filter(o=>["pending","arrived","route"].includes(String(o.status).toLowerCase())).length;$("#statDelivered").textContent=a.filter(o=>String(o.status).toLowerCase()==="delivered").length;$("#statRevenue").textContent=money(a.reduce((n,o)=>n+o.total,0))}
 function validCoords(lat,lng){return Number.isFinite(lat)&&Number.isFinite(lng)&&lat>=-90&&lat<=90&&lng>=-180&&lng<=180}
-function renderMapMarkers(){
- $("#mapCount").textContent=state.orders.filter(o=>validCoords(o.lat,o.lon)).length+" mapped";
- if(!state.map||!window.google?.maps)return;
- state.markers.forEach(m=>m.setMap(null));state.markers=[];
- const bounds=new google.maps.LatLngBounds();let count=0;
- state.orders.forEach(o=>{if(!validCoords(o.lat,o.lon))return;const pos={lat:o.lat,lng:o.lon};const marker=new google.maps.Marker({position:pos,map:state.map,title:(o.id+" · "+o.customerName),label:{text:"",color:"#fff"}});
- const info=new google.maps.InfoWindow({content:'<div style="font:13px Arial;min-width:180px"><b>'+esc(o.customerName)+'</b><p>'+esc(o.id)+'</p><p>'+esc(o.address)+'</p><p>Status: '+esc(o.status)+'</p></div>'});
- marker.addListener("click",()=>{if(state.infoWindow)state.infoWindow.close();state.infoWindow=info;info.open({map:state.map,anchor:marker})});
- state.markers.push(marker);bounds.extend(pos);count++});
- if(count)state.map.fitBounds(bounds);else state.map.setCenter({lat:-1.286389,lng:36.817223});
+
+function renderMapMarkers() {
+  const customerLocations = state.locations.filter(location =>
+    validCoords(location.lat, location.lon)
+  );
+
+  const orderLocations = state.orders.filter(order =>
+    validCoords(order.lat, order.lon)
+  );
+
+  $("#mapCount").textContent =
+    customerLocations.length + " customers · " +
+    orderLocations.length + " deliveries";
+
+  if (!state.map || !window.google?.maps) return;
+
+  // Remove old markers before drawing updated records.
+  state.markers.forEach(marker => marker.setMap(null));
+  state.markers = [];
+
+  const bounds = new google.maps.LatLngBounds();
+  let markerCount = 0;
+
+  function createMarker(position, title, color, label, content) {
+    const marker = new google.maps.Marker({
+      position: position,
+      map: state.map,
+      title: title,
+      icon: {
+        path: google.maps.SymbolPath.CIRCLE,
+        scale: 9,
+        fillColor: color,
+        fillOpacity: 1,
+        strokeColor: "#ffffff",
+        strokeWeight: 2
+      },
+      label: {
+        text: label,
+        color: "#ffffff",
+        fontSize: "10px",
+        fontWeight: "bold"
+      }
+    });
+
+    const info = new google.maps.InfoWindow({
+      content: content
+    });
+
+    marker.addListener("click", () => {
+      if (state.infoWindow) {
+        state.infoWindow.close();
+      }
+
+      state.infoWindow = info;
+      info.open({
+        map: state.map,
+        anchor: marker
+      });
+    });
+
+    state.markers.push(marker);
+    bounds.extend(position);
+    markerCount++;
+  }
+
+  // 1. Draw registered customer locations.
+  customerLocations.forEach(location => {
+    const position = {
+      lat: location.lat,
+      lng: location.lon
+    };
+
+    const content = `
+      <div style="font:13px Arial;min-width:190px">
+        <strong style="color:#248a45">
+          ${esc(location.customerName)}
+        </strong>
+
+        <p>${esc(location.phone)}</p>
+        <p>${esc(location.address)}</p>
+        <p>${esc(location.label || "Primary delivery location")}</p>
+
+        <small>Registered customer</small>
+      </div>
+    `;
+
+    createMarker(
+      position,
+      location.customerName + " · Customer",
+      "#269B50",
+      "C",
+      content
+    );
+  });
+
+  // 2. Draw delivery order locations.
+  orderLocations.forEach(order => {
+    const position = {
+      lat: order.lat,
+      lng: order.lon
+    };
+
+    const content = `
+      <div style="font:13px Arial;min-width:190px">
+        <strong style="color:#2878D0">
+          ${esc(order.customerName)}
+        </strong>
+
+        <p>${esc(order.id)}</p>
+        <p>${esc(order.address)}</p>
+        <p>Status: ${esc(order.status)}</p>
+
+        <small>Delivery order</small>
+      </div>
+    `;
+
+    createMarker(
+      position,
+      order.id + " · Delivery",
+      "#2878D0",
+      "D",
+      content
+    );
+  });
+
+  // Fit the map around all available customer and order locations.
+  if (markerCount > 0) {
+    state.map.fitBounds(bounds);
+
+    // Prevent extreme zoom when there is only one location.
+    if (markerCount === 1) {
+      state.map.setZoom(15);
+    }
+  } else {
+    state.map.setCenter({
+      lat: -1.286389,
+      lng: 36.817223
+    });
+
+    state.map.setZoom(11);
+  }
 }
+
 function initDeliveryMap(){
  const el=$("#deliveryMap");if(!el||!window.google?.maps)return;
  state.map=new google.maps.Map(el,{center:{lat:-1.286389,lng:36.817223},zoom:11,mapTypeControl:true,streetViewControl:false,fullscreenControl:true});
