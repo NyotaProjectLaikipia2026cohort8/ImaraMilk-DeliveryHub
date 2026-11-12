@@ -336,106 +336,476 @@
 <div class="toast" id="toast">Registration was not saved: Could not reach Apps Script. Check the deployment URL and access settings.</div>
 
 <script>
-const CONFIG={API_BASE:"https://script.google.com/macros/s/AKfycbz4yc4PzpyN0I1LVWuPFYtNdw4GnPaOz2T4dGziim4Mqq0-1doUxYgb-FiS6XtV_55u/exec",CURRENCY:"KES"};
-const state={
-  orders:[],
-  customers:[],
-  locations:[],
-  conversations:[],
-  messages:{},
-  selectedConversation:null,
-  activeChatFilter:"all",
-  map:null,
-  markers:[],
-  pinMode:null,
-  selectedPin:null,
-  infoWindow:null
+const CONFIG = {
+  API_BASE: "https://script.google.com/macros/s/AKfycbz4yc4PzpyN0I1LVWuPFYtNdw4GnPaOz2T4dGziim4Mqq0-1doUxYgb-FiS6XtV_55u/exec",
+  CURRENCY: "KES"
 };
-const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const money=v=>new Intl.NumberFormat("en-KE",{style:"currency",currency:CONFIG.CURRENCY,maximumFractionDigits:0}).format(Number(v)||0);
-const initials=n=>String(n||"?").split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join("").toUpperCase();
-const statusClass=s=>String(s||"pending").toLowerCase().replace(/\s+/g,"-");
-const toast=m=>{const t=$("#toast");t.textContent=m;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),3000)};
-function setConnection(ok){$("#connectionState").textContent=ok?"Connected to live data":"Backend unavailable";$("#connectionState").style.color=ok?"#75c88b":"#e9b56a"}
 
-/* Apps Script contract: doGet(action,payload) returns {ok:true,data:...}.
-   The JSONP mode avoids browser CORS preflight from GitHub Pages. Apps Script
-   must return callback(<JSON>) when callback is supplied. */
-function callServer(action,payload={}){
- return new Promise((resolve,reject)=>{
-  const callbackName="imaraJsonp_"+Date.now()+"_"+Math.random().toString(36).slice(2);
-  const url=new URL(CONFIG.API_BASE);
-  url.searchParams.set("action",action);
-  url.searchParams.set("payload",JSON.stringify(payload));
-  url.searchParams.set("callback",callbackName);
-  const script=document.createElement("script");let finished=false;
-  const cleanup=()=>{if(finished)return;finished=true;delete window[callbackName];script.remove();clearTimeout(timer)};
-  const timer=setTimeout(()=>{cleanup();reject(new Error("Apps Script did not respond. Confirm the web app deployment and JSONP doGet handler."))},18000);
-  window[callbackName]=result=>{cleanup();if(result&&result.ok===false)reject(new Error(result.error||"Apps Script error"));else resolve(result?.data??result)};
-  script.onerror=()=>{cleanup();reject(new Error("Could not reach Apps Script. Check the deployment URL and access settings."))};
-  script.src=url.toString();document.head.appendChild(script);
- });
-}
-function normalizeOrder(o){return {id:o.OrderID??o.orderId??o.id??"",customerName:o.CustomerName??o.customerName??"",phone:o.Phone??o.phone??"",address:o.Address??o.address??"",quantity:Number(o.Quantity??o.quantity??0),total:Number(o.Total??o.total??(Number(o.Quantity??o.quantity??0)*Number(o.Price??o.price??0))),status:o.Status??o.status??"Pending",updatedAt:o.CreatedAt??o.updatedAt??"",lat:Number(o.Latitude??o.latitude??o.lat),lon:Number(o.Longitude??o.longitude??o.lon)}}
+const state = {
+  orders: [],
+  customers: [],
+  locations: [],
+  conversations: [],
+  messages: {},
+  selectedConversation: null,
+  activeChatFilter: "all",
+  map: null,
+  markers: [],
+  pinMarker: null,
+  pinMode: null,
+  selectedPin: null,
+  infoWindow: null
+};
 
-state.orders = (d.orders || []).map(normalizeOrder);
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
 
-state.customers = d.customers || [];
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;",
+  '"': "&quot;", "'": "&#39;"
+}[c]));
 
-state.locations = (d.locations || []).map(location => ({
-  locationId: String(location.LocationID || ""),
-  customerId: String(location.CustomerID || ""),
-  customerName: String(location.CustomerName || ""),
-  phone: String(location.Phone || ""),
-  email: String(location.Email || ""),
-  address: String(location.Address || ""),
-  label: String(location.Label || ""),
-  lat: Number(location.Latitude),
-  lon: Number(location.Longitude),
-  isPrimary: location.IsPrimary === true ||
-    String(location.IsPrimary).toLowerCase() === "true"
-}));
+const money = v => new Intl.NumberFormat("en-KE", {
+  style: "currency",
+  currency: CONFIG.CURRENCY,
+  maximumFractionDigits: 0
+}).format(Number(v) || 0);
 
-state.conversations = d.conversations || [];
-state.messages = d.messages || {};
-state.locations = [];
-// First: create or retrieve the customer.
-const customerResult = await callServer("createCustomer", {
-  FullName: customerName,
-  Phone: phone,
-  Email: email
-});
+const initials = n => String(n || "?")
+  .split(/\s+/).filter(Boolean).slice(0, 2)
+  .map(x => x[0]).join("").toUpperCase();
 
-const customer = customerResult.customer;
+const statusClass = s =>
+  String(s || "pending").toLowerCase().replace(/\s+/g, "-");
 
-if (!customer || !customer.CustomerID) {
-  throw new Error("Customer profile was not saved.");
+function toast(message) {
+  const element = $("#toast");
+  if (!element) {
+    console.log(message);
+    return;
+  }
+  element.textContent = message;
+  element.classList.add("show");
+  setTimeout(() => element.classList.remove("show"), 3000);
 }
 
-// Second: save the primary delivery location.
-const locationResult = await callServer("savePrimaryLocation", {
-  CustomerID: customer.CustomerID,
-  Address: address,
-  Latitude: latitude,
-  Longitude: longitude,
-  Label: "Primary delivery location"
-});
-
-if (!locationResult.success) {
-  throw new Error("Customer was saved, but the location could not be saved.");
+function setConnection(ok) {
+  const element = $("#connectionState");
+  if (!element) return;
+  element.textContent = ok
+    ? "Connected to live data"
+    : "Backend unavailable";
+  element.style.color = ok ? "#75c88b" : "#e9b56a";
 }
 
-// Finally: reload the database and map.
-await loadData();
+/* -------------------------------------------------------
+   GOOGLE APPS SCRIPT CONNECTION
+------------------------------------------------------- */
 
-toast("Customer and primary location saved successfully.");
-function renderAll(){renderStats();renderMapMarkers();renderRecent();renderOrders();renderConversations();if(state.selectedConversation)selectConversation(state.selectedConversation,false)}
-function renderStats(){const a=state.orders;$("#statTotal").textContent=a.length;$("#statPending").textContent=a.filter(o=>["pending","arrived","route"].includes(String(o.status).toLowerCase())).length;$("#statDelivered").textContent=a.filter(o=>String(o.status).toLowerCase()==="delivered").length;$("#statRevenue").textContent=money(a.reduce((n,o)=>n+o.total,0))}
-function validCoords(lat,lng){return Number.isFinite(lat)&&Number.isFinite(lng)&&lat>=-90&&lat<=90&&lng>=-180&&lng<=180}
+function callServer(action, payload = {}) {
+  return new Promise((resolve, reject) => {
+    const callbackName =
+      "imaraJsonp_" + Date.now() + "_" +
+      Math.random().toString(36).slice(2);
+
+    const url = new URL(CONFIG.API_BASE);
+    url.searchParams.set("action", action);
+    url.searchParams.set("payload", JSON.stringify(payload));
+    url.searchParams.set("callback", callbackName);
+
+    const script = document.createElement("script");
+    let finished = false;
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Apps Script request timed out."));
+    }, 18000);
+
+    function cleanup() {
+      if (finished) return;
+      finished = true;
+      delete window[callbackName];
+      script.remove();
+      clearTimeout(timer);
+    }
+
+    window[callbackName] = result => {
+      cleanup();
+
+      if (result && result.ok === false) {
+        reject(new Error(result.error || "Server error"));
+        return;
+      }
+
+      resolve(result?.data ?? result);
+    };
+
+    script.onerror = () => {
+      cleanup();
+      reject(new Error("Could not connect to Apps Script."));
+    };
+
+    script.src = url.toString();
+    document.head.appendChild(script);
+  });
+}
+
+/* -------------------------------------------------------
+   DATA NORMALIZATION
+------------------------------------------------------- */
+
+function normalizeOrder(o) {
+  const quantity = Number(o.Quantity ?? o.quantity ?? 0);
+  const price = Number(o.Price ?? o.price ?? 0);
+
+  return {
+    id: o.OrderID ?? o.orderId ?? o.id ?? "",
+    customerId: o.CustomerID ?? o.customerId ?? "",
+    locationId: o.LocationID ?? o.locationId ?? "",
+    customerName: o.CustomerName ?? o.customerName ?? "",
+    phone: o.Phone ?? o.phone ?? "",
+    address: o.Address ?? o.address ?? "",
+    quantity,
+    total: Number(o.Total ?? o.total ?? quantity * price),
+    status: o.Status ?? o.status ?? "Pending",
+    updatedAt: o.CreatedAt ?? o.updatedAt ?? "",
+    lat: Number(o.Latitude ?? o.latitude ?? o.lat),
+    lon: Number(o.Longitude ?? o.longitude ?? o.lon)
+  };
+}
+
+function normalizeLocation(location) {
+  return {
+    locationId: String(location.LocationID || ""),
+    customerId: String(location.CustomerID || ""),
+    customerName: String(location.CustomerName || ""),
+    phone: String(location.Phone || ""),
+    email: String(location.Email || ""),
+    address: String(location.Address || ""),
+    label: String(location.Label || ""),
+    lat: Number(location.Latitude),
+    lon: Number(location.Longitude),
+    isPrimary: location.IsPrimary === true ||
+      String(location.IsPrimary).toLowerCase() === "true"
+  };
+}
+
+function validCoords(lat, lng) {
+  return Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    lat >= -90 && lat <= 90 &&
+    lng >= -180 && lng <= 180;
+}
+
+/* -------------------------------------------------------
+   LOAD DATABASE
+------------------------------------------------------- */
+
+async function loadData() {
+  const refresh = $("#refreshBtn");
+  if (refresh) refresh.disabled = true;
+
+  try {
+    const data = await callServer("bootstrap");
+
+    state.orders = (data.orders || []).map(normalizeOrder);
+    state.customers = data.customers || [];
+    state.locations = (data.locations || []).map(normalizeLocation);
+    state.conversations = data.conversations || [];
+    state.messages = data.messages || {};
+
+    setConnection(true);
+    renderAll();
+
+  } catch (error) {
+    console.error("Database loading failed:", error);
+    setConnection(false);
+    toast(error.message || "Could not load dashboard data.");
+  } finally {
+    if (refresh) refresh.disabled = false;
+  }
+}
+
+function renderAll() {
+  renderStats();
+  renderMapMarkers();
+  renderRecent();
+  renderOrders();
+  renderConversations();
+
+  if (state.selectedConversation) {
+    renderMessages(state.selectedConversation);
+  }
+}
+
+function renderStats() {
+  const orders = state.orders;
+
+  if ($("#statTotal")) {
+    $("#statTotal").textContent = orders.length;
+  }
+
+  if ($("#statPending")) {
+    $("#statPending").textContent = orders.filter(o =>
+      ["pending", "arrived", "route"].includes(
+        String(o.status).toLowerCase()
+      )
+    ).length;
+  }
+
+  if ($("#statDelivered")) {
+    $("#statDelivered").textContent = orders.filter(o =>
+      String(o.status).toLowerCase() === "delivered"
+    ).length;
+  }
+
+  if ($("#statRevenue")) {
+    $("#statRevenue").textContent = money(
+      orders.reduce((total, order) => total + order.total, 0)
+    );
+  }
+}
+
+/* -------------------------------------------------------
+   CUSTOMER REGISTRATION
+------------------------------------------------------- */
+
+async function registerCustomer(event) {
+  if (event) event.preventDefault();
+
+  const form = $("#registrationForm");
+  if (!form) return;
+
+  const submitButton = form.querySelector(
+    '[type="submit"]'
+  );
+
+  if (submitButton) submitButton.disabled = true;
+
+  try {
+    const formData = new FormData(form);
+
+    const customerName = String(
+      formData.get("customerName") || formData.get("FullName") || ""
+    ).trim();
+
+    const phone = String(
+      formData.get("phone") || formData.get("Phone") || ""
+    ).trim();
+
+    const email = String(
+      formData.get("email") || formData.get("Email") || ""
+    ).trim();
+
+    const address = String(
+      formData.get("address") || formData.get("Address") || ""
+    ).trim();
+
+    const latitude = Number(
+      formData.get("latitude") || formData.get("Latitude")
+    );
+
+    const longitude = Number(
+      formData.get("longitude") || formData.get("Longitude")
+    );
+
+    if (!customerName || !phone || !address) {
+      throw new Error("Enter the customer's name, phone and address.");
+    }
+
+    if (!validCoords(latitude, longitude)) {
+      throw new Error(
+        "Select the customer's location using GPS or the map pin."
+      );
+    }
+
+    const customerResult = await callServer("createCustomer", {
+      FullName: customerName,
+      Phone: phone,
+      Email: email
+    });
+
+    const customer = customerResult.customer;
+
+    if (!customer || !customer.CustomerID) {
+      throw new Error("Customer profile was not saved.");
+    }
+
+    const locationResult = await callServer(
+      "savePrimaryLocation",
+      {
+        CustomerID: customer.CustomerID,
+        Address: address,
+        Latitude: latitude,
+        Longitude: longitude,
+        Label: "Primary delivery location"
+      }
+    );
+
+    if (!locationResult.success) {
+      throw new Error(
+        "Customer saved, but primary location could not be saved."
+      );
+    }
+
+    await loadData();
+
+    form.reset();
+
+    if ($("#registrationLocationReadout")) {
+      $("#registrationLocationReadout").textContent =
+        "No location selected";
+    }
+
+    state.selectedPin = null;
+
+    closeModals();
+
+    toast("Customer and primary location saved successfully.");
+
+  } catch (error) {
+    console.error("Registration error:", error);
+    toast(error.message || "Customer registration failed.");
+  } finally {
+    if (submitButton) submitButton.disabled = false;
+  }
+}
+
+/* -------------------------------------------------------
+   CREATE DELIVERY ORDER
+------------------------------------------------------- */
+
+async function createOrder(event) {
+  if (event) event.preventDefault();
+
+  const form = $("#orderForm");
+  if (!form) return;
+
+  const submitButton = form.querySelector('[type="submit"]');
+  if (submitButton) submitButton.disabled = true;
+
+  try {
+    const data = new FormData(form);
+
+    const customerName = String(
+      data.get("customerName") || data.get("CustomerName") || ""
+    ).trim();
+
+    const phone = String(
+      data.get("phone") || data.get("Phone") || ""
+    ).trim();
+
+    const address = String(
+      data.get("address") || data.get("Address") || ""
+    ).trim();
+
+    const quantity = Number(
+      data.get("quantity") || data.get("Quantity")
+    );
+
+    const price = Number(
+      data.get("price") || data.get("Price")
+    );
+
+    const latitude = Number(
+      data.get("latitude") || data.get("Latitude")
+    );
+
+    const longitude = Number(
+      data.get("longitude") || data.get("Longitude")
+    );
+
+    const notes = String(
+      data.get("notes") || data.get("Notes") || ""
+    ).trim();
+
+    if (!customerName || !phone || !address) {
+      throw new Error("Complete the customer and delivery details.");
+    }
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw new Error("Enter a valid milk quantity.");
+    }
+
+    if (!Number.isFinite(price) || price < 0) {
+      throw new Error("Enter a valid milk price.");
+    }
+
+    if (!validCoords(latitude, longitude)) {
+      throw new Error(
+        "Select a delivery location using GPS or the map pin."
+      );
+    }
+
+    const result = await callServer("createOrder", {
+      CustomerName: customerName,
+      Phone: phone,
+      Address: address,
+      Latitude: latitude,
+      Longitude: longitude,
+      Quantity: quantity,
+      Price: price,
+      Notes: notes
+    });
+
+    if (!result.success) {
+      throw new Error(result.error || "Order was not saved.");
+    }
+
+    await loadData();
+    form.reset();
+
+    if ($("#orderLocationReadout")) {
+      $("#orderLocationReadout").textContent =
+        "No location selected";
+    }
+
+    state.selectedPin = null;
+    closeModals();
+
+    toast("Delivery order saved successfully.");
+
+  } catch (error) {
+    console.error("Order error:", error);
+    toast(error.message || "Could not create order.");
+  } finally {
+    if (submitButton) submitButton.disabled = false;
+  }
+}
+
+/* -------------------------------------------------------
+   GOOGLE MAPS
+------------------------------------------------------- */
+
+function initDeliveryMap() {
+  const element = $("#deliveryMap");
+
+  if (!element || !window.google?.maps) return;
+
+  state.map = new google.maps.Map(element, {
+    center: { lat: -1.286389, lng: 36.817223 },
+    zoom: 11,
+    mapTypeControl: true,
+    streetViewControl: false,
+    fullscreenControl: true
+  });
+
+  state.map.addListener("click", event => {
+    if (!state.pinMode) return;
+
+    setSelectedLocation(
+      state.pinMode,
+      event.latLng.lat(),
+      event.latLng.lng()
+    );
+  });
+
+  renderMapMarkers();
+}
 
 function renderMapMarkers() {
   const customerLocations = state.locations.filter(location =>
+    location.isPrimary &&
     validCoords(location.lat, location.lon)
   );
 
@@ -443,24 +813,27 @@ function renderMapMarkers() {
     validCoords(order.lat, order.lon)
   );
 
-  $("#mapCount").textContent =
-    customerLocations.length + " customers · " +
-    orderLocations.length + " deliveries";
+  if ($("#mapCount")) {
+    $("#mapCount").textContent =
+      customerLocations.length + " customers · " +
+      orderLocations.length + " deliveries";
+  }
 
   if (!state.map || !window.google?.maps) return;
 
-  // Remove old markers before drawing updated records.
   state.markers.forEach(marker => marker.setMap(null));
   state.markers = [];
 
-  const bounds = new google.maps.LatLngBounds();
-  let markerCount = 0;
+  if (state.infoWindow) state.infoWindow.close();
 
-  function createMarker(position, title, color, label, content) {
+  const bounds = new google.maps.LatLngBounds();
+  let count = 0;
+
+  function addMarker(position, title, color, letter, content) {
     const marker = new google.maps.Marker({
-      position: position,
+      position,
       map: state.map,
-      title: title,
+      title,
       icon: {
         path: google.maps.SymbolPath.CIRCLE,
         scale: 9,
@@ -470,7 +843,7 @@ function renderMapMarkers() {
         strokeWeight: 2
       },
       label: {
-        text: label,
+        text: letter,
         color: "#ffffff",
         fontSize: "10px",
         fontWeight: "bold"
@@ -478,157 +851,244 @@ function renderMapMarkers() {
     });
 
     const info = new google.maps.InfoWindow({
-      content: content
+      content
     });
 
     marker.addListener("click", () => {
-      if (state.infoWindow) {
-        state.infoWindow.close();
-      }
-
+      if (state.infoWindow) state.infoWindow.close();
       state.infoWindow = info;
-      info.open({
-        map: state.map,
-        anchor: marker
-      });
+      info.open(state.map, marker);
     });
 
     state.markers.push(marker);
     bounds.extend(position);
-    markerCount++;
+    count++;
   }
 
-  // 1. Draw registered customer locations.
   customerLocations.forEach(location => {
-    const position = {
-      lat: location.lat,
-      lng: location.lon
-    };
-
-    const content = `
-      <div style="font:13px Arial;min-width:190px">
-        <strong style="color:#248a45">
-          ${esc(location.customerName)}
-        </strong>
-
-        <p>${esc(location.phone)}</p>
-        <p>${esc(location.address)}</p>
-        <p>${esc(location.label || "Primary delivery location")}</p>
-
-        <small>Registered customer</small>
-      </div>
-    `;
-
-    createMarker(
-      position,
-      location.customerName + " · Customer",
+    addMarker(
+      { lat: location.lat, lng: location.lon },
+      location.customerName + " - Customer",
       "#269B50",
       "C",
-      content
+      `<div style="font:13px Arial;min-width:180px">
+        <strong>${esc(location.customerName)}</strong>
+        <p>${esc(location.phone)}</p>
+        <p>${esc(location.address)}</p>
+        <small>Primary customer location</small>
+      </div>`
     );
   });
 
-  // 2. Draw delivery order locations.
   orderLocations.forEach(order => {
-    const position = {
-      lat: order.lat,
-      lng: order.lon
-    };
-
-    const content = `
-      <div style="font:13px Arial;min-width:190px">
-        <strong style="color:#2878D0">
-          ${esc(order.customerName)}
-        </strong>
-
+    addMarker(
+      { lat: order.lat, lng: order.lon },
+      order.id + " - Delivery",
+      "#2878D0",
+      "D",
+      `<div style="font:13px Arial;min-width:180px">
+        <strong>${esc(order.customerName)}</strong>
         <p>${esc(order.id)}</p>
         <p>${esc(order.address)}</p>
         <p>Status: ${esc(order.status)}</p>
-
-        <small>Delivery order</small>
-      </div>
-    `;
-
-    createMarker(
-      position,
-      order.id + " · Delivery",
-      "#2878D0",
-      "D",
-      content
+        <small>Delivery location</small>
+      </div>`
     );
   });
 
-  // Fit the map around all available customer and order locations.
-  if (markerCount > 0) {
+  if (count > 0) {
     state.map.fitBounds(bounds);
-
-    // Prevent extreme zoom when there is only one location.
-    if (markerCount === 1) {
-      state.map.setZoom(15);
-    }
+    if (count === 1) state.map.setZoom(15);
   } else {
     state.map.setCenter({
       lat: -1.286389,
       lng: 36.817223
     });
-
     state.map.setZoom(11);
   }
 }
 
-function initDeliveryMap(){
- const el=$("#deliveryMap");if(!el||!window.google?.maps)return;
- state.map=new google.maps.Map(el,{center:{lat:-1.286389,lng:36.817223},zoom:11,mapTypeControl:true,streetViewControl:false,fullscreenControl:true});
- state.map.addListener("click",e=>{if(!state.pinMode)return;setSelectedLocation(state.pinMode,e.latLng.lat(),e.latLng.lng())});
- renderMapMarkers();
+function startPinSelection(formType) {
+  state.pinMode = formType;
+  closeModals();
+
+  toast(
+    "Tap the map to select the " +
+    (formType === "registration" ? "customer" : "delivery") +
+    " location."
+  );
+
+  $("#deliveryMap")?.scrollIntoView({
+    behavior: "smooth",
+    block: "center"
+  });
+
+  if (state.map && window.google?.maps) {
+    google.maps.event.trigger(state.map, "resize");
+  }
 }
-function startPinSelection(formType){
- state.pinMode=formType;closeModals();toast("Tap the map to place the "+(formType==="registration"?"primary customer":"delivery")+" pin.");$("#deliveryMap").scrollIntoView({behavior:"smooth",block:"center"});
- if(state.map)google.maps.event.trigger(state.map,"resize");
+
+function setSelectedLocation(formType, lat, lng) {
+  if (!validCoords(lat, lng)) return;
+
+  state.selectedPin = { formType, lat, lng };
+
+  const form = formType === "registration"
+    ? $("#registrationForm")
+    : $("#orderForm");
+
+  if (!form) return;
+
+  if (form.elements.latitude) {
+    form.elements.latitude.value = lat.toFixed(7);
+  }
+
+  if (form.elements.longitude) {
+    form.elements.longitude.value = lng.toFixed(7);
+  }
+
+  const readout = formType === "registration"
+    ? $("#registrationLocationReadout")
+    : $("#orderLocationReadout");
+
+  if (readout) {
+    readout.textContent =
+      "Selected: " + lat.toFixed(6) + ", " + lng.toFixed(6);
+  }
+
+  if (state.pinMarker) state.pinMarker.setMap(null);
+
+  state.pinMarker = new google.maps.Marker({
+    position: { lat, lng },
+    map: state.map,
+    draggable: true,
+    title: "Selected location"
+  });
+
+  state.pinMarker.addListener("dragend", event => {
+    setSelectedLocation(
+      formType,
+      event.latLng.lat(),
+      event.latLng.lng()
+    );
+  });
+
+  state.map.panTo({ lat, lng });
+  state.map.setZoom(Math.max(state.map.getZoom(), 15));
+
+  state.pinMode = null;
+
+  const modal = $(
+    formType === "registration"
+      ? "#registrationModal"
+      : "#orderModal"
+  );
+
+  modal?.classList.add("open");
 }
-function setSelectedLocation(formType,lat,lng){
- if(!validCoords(lat,lng))return;
- state.selectedPin={formType,lat,lng};
- const form=formType==="registration"?$("#registrationForm"):$("#orderForm");
- form.elements.latitude.value=lat.toFixed(7);form.elements.longitude.value=lng.toFixed(7);
- const readout=formType==="registration"?$("#registrationLocationReadout"):$("#orderLocationReadout");
- readout.textContent="Selected: "+lat.toFixed(6)+", "+lng.toFixed(6);
- if(state.pinMarker)state.pinMarker.setMap(null);
- state.pinMarker=new google.maps.Marker({position:{lat,lng},map:state.map,draggable:true,title:"Selected location"});
- state.pinMarker.addListener("dragend",e=>setSelectedLocation(formType,e.latLng.lat(),e.latLng.lng()));
- state.map.panTo({lat,lng});state.map.setZoom(Math.max(state.map.getZoom(),15));state.pinMode=null;
- // Return the modal to the user after selecting a map pin.
- $("#"+(formType==="registration"?"registrationModal":"orderModal")).classList.add("open");
+
+function captureGps(formType) {
+  if (!navigator.geolocation) {
+    toast("GPS is not supported by this browser.");
+    return;
+  }
+
+  toast("Waiting for GPS permission...");
+
+  navigator.geolocation.getCurrentPosition(
+    position => {
+      setSelectedLocation(
+        formType,
+        position.coords.latitude,
+        position.coords.longitude
+      );
+    },
+    error => {
+      toast(
+        error.code === 1
+          ? "Location permission denied. Choose a map pin."
+          : "Could not get GPS location."
+      );
+    },
+    {
+      enableHighAccuracy: true,
+      timeout: 15000,
+      maximumAge: 0
+    }
+  );
 }
-function captureGps(formType){
- if(!navigator.geolocation){toast("GPS is not supported by this browser.");return}
- toast("Waiting for location permission…");
- navigator.geolocation.getCurrentPosition(pos=>setSelectedLocation(formType,pos.coords.latitude,pos.coords.longitude),err=>toast(err.code===1?"Location permission was denied. You can choose a map pin instead.":"Could not get GPS location. Try selecting a map pin."),{enableHighAccuracy:true,timeout:15000,maximumAge:0});
+
+/* -------------------------------------------------------
+   ORDERS AND DASHBOARD
+------------------------------------------------------- */
+
+function orderRow(order) {
+  return `
+    <div class="order-row">
+      <div>
+        <div class="order-name">
+          ${esc(order.id)} · ${esc(order.customerName)}
+        </div>
+        <div class="order-address">${esc(order.address)}</div>
+      </div>
+      <span class="status status-${statusClass(order.status)}">
+        ${esc(order.status)}
+      </span>
+    </div>
+  `;
 }
-function orderRow(o){return '<div class="order-row"><div><div class="order-name">'+esc(o.id)+' · '+esc(o.customerName)+'</div><div class="order-address">'+esc(o.address)+'</div></div><span class="status status-'+statusClass(o.status)+'">'+esc(o.status)+'</span></div>'}
-function renderRecent(){$("#recentOrders").innerHTML=state.orders.slice(0,6).map(orderRow).join("")||'<div class="empty">No live orders recorded yet.</div>'}
-function renderOrders(){$("#ordersTable").innerHTML=state.orders.map(o=>'<tr><td><strong>'+esc(o.id)+'</strong></td><td>'+esc(o.customerName)+'<br><small>'+esc(o.phone)+'</small></td><td>'+esc(o.address)+'</td><td>'+esc(o.quantity)+'</td><td>'+money(o.total)+'</td><td><span class="status status-'+statusClass(o.status)+'">'+esc(o.status)+'</span></td><td>'+esc(o.updatedAt)+'</td></tr>').join("")||'<tr><td colspan="7" class="empty">No live orders recorded yet.</td></tr>'}
+
+function renderRecent() {
+  if (!$("#recentOrders")) return;
+
+  $("#recentOrders").innerHTML =
+    state.orders.slice(0, 6).map(orderRow).join("") ||
+    '<div class="empty">No live orders recorded yet.</div>';
+}
+
+function renderOrders() {
+  if (!$("#ordersTable")) return;
+
+  $("#ordersTable").innerHTML =
+    state.orders.map(order => `
+      <tr>
+        <td><strong>${esc(order.id)}</strong></td>
+        <td>${esc(order.customerName)}<br>
+          <small>${esc(order.phone)}</small>
+        </td>
+        <td>${esc(order.address)}</td>
+        <td>${esc(order.quantity)}</td>
+        <td>${money(order.total)}</td>
+        <td>
+          <span class="status status-${statusClass(order.status)}">
+            ${esc(order.status)}
+          </span>
+        </td>
+        <td>${esc(order.updatedAt)}</td>
+      </tr>
+    `).join("") ||
+    '<tr><td colspan="7" class="empty">No live orders recorded yet.</td></tr>';
+}
+
+/* -------------------------------------------------------
+   CUSTOMER CONVERSATIONS
+------------------------------------------------------- */
 
 function renderConversations(filter = "") {
   const query = String(filter).toLowerCase().trim();
   const list = $("#conversationList");
+  if (!list) return;
 
   const conversations = state.conversations.filter(c => {
     const searchable = [
-      c.customerName,
-      c.phone,
-      c.customerId,
-      c.lastMessage,
-      c.orderId
+      c.customerName, c.phone, c.customerId,
+      c.lastMessage, c.orderId
     ].join(" ").toLowerCase();
 
     if (!searchable.includes(query)) return false;
 
-    if (state.activeChatFilter === "unread") {
-      return Number(c.unreadCount) > 0;
-    }
-
-    return true;
+    return state.activeChatFilter !== "unread" ||
+      Number(c.unreadCount) > 0;
   });
 
   list.innerHTML = conversations.map(c => {
@@ -646,42 +1106,28 @@ function renderConversations(filter = "") {
     return `
       <div class="conversation ${active ? "active" : ""}"
            data-id="${esc(id)}">
-
-        <div class="avatar">
-          ${esc(initials(c.customerName))}
-        </div>
-
+        <div class="avatar">${esc(initials(c.customerName))}</div>
         <div class="conversation-content">
           <div class="conversation-top">
             <span class="conversation-name">
               ${esc(c.customerName)}
             </span>
-            <span class="conversation-time">
-              ${esc(time)}
-            </span>
+            <span class="conversation-time">${esc(time)}</span>
           </div>
-
           <div class="conversation-preview">
             ${esc(c.lastMessage || "Start a conversation")}
           </div>
-
           <small class="conversation-phone">
             ${esc(c.phone || "No phone number")}
           </small>
         </div>
-
         ${Number(c.unreadCount) > 0
           ? `<span class="chat-unread">${Number(c.unreadCount)}</span>`
           : ""}
       </div>
     `;
-  }).join("") || `
-    <div class="empty">
-      ${state.customers.length
-        ? "No matching customers."
-        : "No registered customers yet. Register a customer to begin."}
-    </div>
-  `;
+  }).join("") ||
+  '<div class="empty">No matching customers.</div>';
 
   list.querySelectorAll(".conversation").forEach(element => {
     element.onclick = () =>
@@ -694,34 +1140,25 @@ function openCustomerPicker() {
 
   if (!modal) {
     document.body.insertAdjacentHTML("beforeend", `
-      <div id="customerPickerModal"
-           class="modal-bg open">
-
+      <div id="customerPickerModal" class="modal-bg open">
         <div class="modal customer-picker">
           <div class="modal-header">
             <div>
               <h2>New conversation</h2>
               <p>Select a registered customer</p>
             </div>
-
-            <button type="button"
-                    class="icon-btn"
-                    id="closeCustomerPicker">
-              ✕
-            </button>
+            <button type="button" class="icon-btn"
+                    id="closeCustomerPicker">✕</button>
           </div>
-
           <input id="customerPickerSearch"
                  placeholder="Search by name or phone..."
                  autocomplete="off">
-
           <div id="customerPickerList"></div>
         </div>
       </div>
     `);
 
     modal = $("#customerPickerModal");
-
     $("#closeCustomerPicker").onclick = closeCustomerPicker;
 
     modal.onclick = event => {
@@ -732,10 +1169,8 @@ function openCustomerPicker() {
   }
 
   modal.classList.add("open");
-
   $("#customerPickerSearch").value = "";
   renderCustomerPicker();
-
   $("#customerPickerSearch").focus();
 }
 
@@ -744,69 +1179,56 @@ function closeCustomerPicker() {
 }
 
 function renderCustomerPicker() {
-  const query = ($("#customerPickerSearch").value || "")
-    .toLowerCase().trim();
+  const search = $("#customerPickerSearch");
+  const target = $("#customerPickerList");
+  if (!search || !target) return;
+
+  const query = search.value.toLowerCase().trim();
 
   const customers = state.customers.filter(customer => {
-    const text = [
-      customer.FullName,
-      customer.Phone,
-      customer.Email,
-      customer.CustomerID
+    const searchable = [
+      customer.FullName, customer.Phone,
+      customer.Email, customer.CustomerID
     ].join(" ").toLowerCase();
 
-    return text.includes(query) &&
-      String(customer.AccountStatus || "Active").toLowerCase()
-        === "active";
+    return searchable.includes(query) &&
+      String(customer.AccountStatus || "Active").toLowerCase() === "active";
   });
 
-  $("#customerPickerList").innerHTML =
-    customers.map(customer => `
-      <div class="picker-customer"
-           data-customer-id="${esc(customer.CustomerID)}">
-
-        <div class="avatar">
-          ${esc(initials(customer.FullName))}
-        </div>
-
-        <div class="picker-customer-info">
-          <strong>${esc(customer.FullName)}</strong>
-          <small>${esc(customer.Phone || "No phone number")}</small>
-        </div>
-
-        <span>›</span>
+  target.innerHTML = customers.map(customer => `
+    <div class="picker-customer"
+         data-customer-id="${esc(customer.CustomerID)}">
+      <div class="avatar">${esc(initials(customer.FullName))}</div>
+      <div class="picker-customer-info">
+        <strong>${esc(customer.FullName)}</strong>
+        <small>${esc(customer.Phone || "No phone number")}</small>
       </div>
-    `).join("") || `
-      <div class="empty">
-        ${state.customers.length
-          ? "No matching registered customers."
-          : "No registered customers are available yet."}
-      </div>
-    `;
+      <span>›</span>
+    </div>
+  `).join("") ||
+  '<div class="empty">No registered customers found.</div>';
 
-  $("#customerPickerList")
-    .querySelectorAll(".picker-customer")
-    .forEach(element => {
-      element.onclick = () => {
-        const id = element.dataset.customerId;
-        closeCustomerPicker();
-        selectConversation(id);
-      };
-    });
+  target.querySelectorAll(".picker-customer").forEach(element => {
+    element.onclick = () => {
+      const id = element.dataset.customerId;
+      closeCustomerPicker();
+      selectConversation(id);
+    };
+  });
 }
 
-
 function renderMessages(id) {
+  const target = $("#messages");
+  if (!target) return;
+
   const messages = state.messages[id] || [];
 
-  $("#messages").innerHTML = messages.length
+  target.innerHTML = messages.length
     ? messages.map(message => {
-        const sender = String(message.sender || "").toLowerCase();
-        const business = sender === "business";
+        const business =
+          String(message.sender || "").toLowerCase() === "business";
 
-        const date = message.time
-          ? new Date(message.time)
-          : null;
+        const date = message.time ? new Date(message.time) : null;
 
         const time = date && !isNaN(date.getTime())
           ? date.toLocaleTimeString("en-KE", {
@@ -822,11 +1244,10 @@ function renderMessages(id) {
           </div>
         `;
       }).join("")
-    : `<div class="empty">No messages yet. Start the conversation.</div>`;
+    : '<div class="empty">No messages yet. Start the conversation.</div>';
 
-  $("#messages").scrollTop = $("#messages").scrollHeight;
+  target.scrollTop = target.scrollHeight;
 }
-
 
 async function selectConversation(id, fetchRemote = true) {
   const conversation = state.conversations.find(
@@ -837,35 +1258,41 @@ async function selectConversation(id, fetchRemote = true) {
 
   state.selectedConversation = id;
 
-  $("#chatAvatar").textContent =
-    initials(conversation.customerName);
+  if ($("#chatAvatar")) {
+    $("#chatAvatar").textContent = initials(conversation.customerName);
+  }
 
-  $("#chatName").textContent =
-    conversation.customerName;
+  if ($("#chatName")) {
+    $("#chatName").textContent = conversation.customerName;
+  }
 
-  $("#chatStatus").textContent =
-    conversation.phone || "Registered customer";
+  if ($("#chatStatus")) {
+    $("#chatStatus").textContent =
+      conversation.phone || "Registered customer";
+  }
 
-  $("#conversationDetails").innerHTML = `
-    <div class="detail-block">
-      <div class="detail-label">Customer</div>
-      <div class="detail-value">${esc(conversation.customerName)}</div>
-    </div>
-    <div class="detail-block">
-      <div class="detail-label">Phone</div>
-      <div class="detail-value">${esc(conversation.phone || "—")}</div>
-    </div>
-    <div class="detail-block">
-      <div class="detail-label">Customer ID</div>
-      <div class="detail-value">${esc(conversation.customerId)}</div>
-    </div>
-    <div class="detail-block">
-      <div class="detail-label">Related order</div>
-      <div class="detail-value">${esc(conversation.orderId || "No linked order")}</div>
-    </div>
-  `;
+  if ($("#conversationDetails")) {
+    $("#conversationDetails").innerHTML = `
+      <div class="detail-block">
+        <div class="detail-label">Customer</div>
+        <div class="detail-value">${esc(conversation.customerName)}</div>
+      </div>
+      <div class="detail-block">
+        <div class="detail-label">Phone</div>
+        <div class="detail-value">${esc(conversation.phone || "—")}</div>
+      </div>
+      <div class="detail-block">
+        <div class="detail-label">Customer ID</div>
+        <div class="detail-value">${esc(conversation.customerId)}</div>
+      </div>
+      <div class="detail-block">
+        <div class="detail-label">Related order</div>
+        <div class="detail-value">${esc(conversation.orderId || "No linked order")}</div>
+      </div>
+    `;
+  }
 
-  renderConversations($("#conversationSearch").value);
+  renderConversations($("#conversationSearch")?.value || "");
   renderMessages(id);
 
   if (fetchRemote) {
@@ -877,7 +1304,7 @@ async function selectConversation(id, fetchRemote = true) {
       state.messages[id] = result.messages || [];
       renderMessages(id);
     } catch (error) {
-      console.warn("Could not load conversation:", error);
+      console.warn("Could not load messages:", error);
     }
   }
 }
@@ -885,6 +1312,8 @@ async function selectConversation(id, fetchRemote = true) {
 async function sendMessage() {
   const input = $("#messageInput");
   const button = $("#sendBtn");
+
+  if (!input || !button) return;
 
   const message = input.value.trim();
   const customerId = state.selectedConversation;
@@ -901,7 +1330,7 @@ async function sendMessage() {
     });
 
     if (!result.record) {
-      throw new Error("The server did not confirm the saved message.");
+      throw new Error("Server did not confirm the message.");
     }
 
     if (!state.messages[customerId]) {
@@ -909,9 +1338,7 @@ async function sendMessage() {
     }
 
     state.messages[customerId].push(result.record);
-
     input.value = "";
-
     renderMessages(customerId);
     await loadConversationDirectory();
 
@@ -927,50 +1354,202 @@ async function sendMessage() {
 async function loadConversationDirectory() {
   try {
     const data = await callServer("bootstrap");
-
     state.conversations = data.conversations || [];
-
-    renderConversations(
-      $("#conversationSearch").value
-    );
+    renderConversations($("#conversationSearch")?.value || "");
   } catch (error) {
     console.error("Customer directory error:", error);
   }
 }
 
-async function generateSummary(){if(!state.selectedConversation)return toast("Select a conversation first");$("#summaryModal").classList.add("open");$("#summaryContent").textContent="Generating…";try{const r=await callServer("summarizeConversation",{conversationId:state.selectedConversation});$("#summaryContent").innerHTML='<div class="card-body" style="padding:0"><p style="line-height:1.6">'+esc(r.summary||"No summary returned.")+'</p></div>'}catch(e){$("#summaryContent").textContent=e.message||"Could not generate summary."}}
-function openOrder(){$("#orderModal").classList.add("open")}function closeModals(){$$(".modal-bg").forEach(x=>x.classList.remove("open"))}
-function switchView(name){$$(".nav button").forEach(b=>b.classList.toggle("active",b.dataset.view===name));$$(".view").forEach(v=>v.classList.toggle("active",v.id==="view-"+name));const m={dashboard:["Dashboard","Milk delivery operations at a glance"],orders:["Orders","Track and manage every delivery"],messages:["Messages","Customer conversations and support"]}[name];$("#pageTitle").textContent=m[0];$("#pageSubtitle").textContent=m[1];$("#sidebar").classList.remove("open");if(name==="messages"&&!state.selectedConversation&&state.conversations[0])selectConversation(state.conversations[0].id)}
-$$(".nav button").forEach(b=>b.onclick=()=>switchView(b.dataset.view));$$("[data-view-jump]").forEach(b=>b.onclick=()=>switchView(b.dataset.viewJump));
-$("#refreshBtn").onclick=loadData;$("#newOrderBtn").onclick=openOrder;$("#newOrderBtn2").onclick=openOrder;$("#registerCustomerBtn").onclick=()=>$("#registrationModal").classList.add("open");
-$("#orderForm").onsubmit=createOrder;$("#registrationForm").onsubmit=registerCustomer;
-$("#orderGpsBtn").onclick=()=>captureGps("order");$("#registrationGpsBtn").onclick=()=>captureGps("registration");
-$("#orderPinBtn").onclick=()=>startPinSelection("order");$("#registrationPinBtn").onclick=()=>startPinSelection("registration");
-$("#sendBtn").onclick=sendMessage;$("#messageInput").onkeydown=e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage()}};
-$("#summaryBtn").onclick=generateSummary;$("#conversationSearch").oninput=e=>renderConversations(e.target.value);$("#menuBtn").onclick=()=>$("#sidebar").classList.toggle("open");
-$$("[data-close]").forEach(b=>b.onclick=closeModals);$$(".modal-bg").forEach(bg=>bg.onclick=e=>{if(e.target===bg)closeModals()});
-loadData();
-    
-$("#newChatBtn").onclick = openCustomerPicker;
+async function generateSummary() {
+  if (!state.selectedConversation) {
+    toast("Select a conversation first.");
+    return;
+  }
 
-$("#conversationSearch").oninput = e => {
-  renderConversations(e.target.value);
-};
+  $("#summaryModal")?.classList.add("open");
 
-$$(".chat-filter").forEach(button => {
-  button.onclick = () => {
-    $$(".chat-filter").forEach(item =>
-      item.classList.remove("active")
-    );
+  if ($("#summaryContent")) {
+    $("#summaryContent").textContent = "Generating...";
+  }
 
-    button.classList.add("active");
-    state.activeChatFilter = button.dataset.filter;
+  try {
+    const result = await callServer("summarizeConversation", {
+      conversationId: state.selectedConversation
+    });
 
-    renderConversations($("#conversationSearch").value);
+    if ($("#summaryContent")) {
+      $("#summaryContent").innerHTML =
+        '<div class="card-body" style="padding:0"><p style="line-height:1.6">' +
+        esc(result.summary || "No summary returned.") +
+        "</p></div>";
+    }
+  } catch (error) {
+    if ($("#summaryContent")) {
+      $("#summaryContent").textContent =
+        error.message || "Could not generate summary.";
+    }
+  }
+}
+
+/* -------------------------------------------------------
+   NAVIGATION AND MODALS
+------------------------------------------------------- */
+
+function openOrder() {
+  $("#orderModal")?.classList.add("open");
+}
+
+function closeModals() {
+  $$(".modal-bg").forEach(element =>
+    element.classList.remove("open")
+  );
+}
+
+function switchView(name) {
+  $$(".nav button").forEach(button =>
+    button.classList.toggle("active", button.dataset.view === name)
+  );
+
+  $$(".view").forEach(view =>
+    view.classList.toggle("active", view.id === "view-" + name)
+  );
+
+  const pages = {
+    dashboard: ["Dashboard", "Milk delivery operations at a glance"],
+    orders: ["Orders", "Track and manage every delivery"],
+    messages: ["Messages", "Customer conversations and support"]
   };
-});
 
-</script>
+  if (pages[name]) {
+    $("#pageTitle").textContent = pages[name][0];
+    $("#pageSubtitle").textContent = pages[name][1];
+  }
+
+  $("#sidebar")?.classList.remove("open");
+
+  if (
+    name === "messages" &&
+    !state.selectedConversation &&
+    state.conversations[0]
+  ) {
+    selectConversation(state.conversations[0].id);
+  }
+}
+
+/* -------------------------------------------------------
+   EVENT LISTENERS
+------------------------------------------------------- */
+
+function initializeApp() {
+  $$(".nav button").forEach(button => {
+    button.onclick = () => switchView(button.dataset.view);
+  });
+
+  $$("[data-view-jump]").forEach(button => {
+    button.onclick = () => switchView(button.dataset.viewJump);
+  });
+
+  if ($("#refreshBtn")) $("#refreshBtn").onclick = loadData;
+  if ($("#newOrderBtn")) $("#newOrderBtn").onclick = openOrder;
+  if ($("#newOrderBtn2")) $("#newOrderBtn2").onclick = openOrder;
+
+  if ($("#registerCustomerBtn")) {
+    $("#registerCustomerBtn").onclick = () =>
+      $("#registrationModal")?.classList.add("open");
+  }
+
+  if ($("#orderForm")) {
+    $("#orderForm").onsubmit = createOrder;
+  }
+
+  if ($("#registrationForm")) {
+    $("#registrationForm").onsubmit = registerCustomer;
+  }
+
+  if ($("#orderGpsBtn")) {
+    $("#orderGpsBtn").onclick = () => captureGps("order");
+  }
+
+  if ($("#registrationGpsBtn")) {
+    $("#registrationGpsBtn").onclick =
+      () => captureGps("registration");
+  }
+
+  if ($("#orderPinBtn")) {
+    $("#orderPinBtn").onclick = () => startPinSelection("order");
+  }
+
+  if ($("#registrationPinBtn")) {
+    $("#registrationPinBtn").onclick =
+      () => startPinSelection("registration");
+  }
+
+  if ($("#sendBtn")) $("#sendBtn").onclick = sendMessage;
+
+  if ($("#messageInput")) {
+    $("#messageInput").onkeydown = event => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+      }
+    };
+  }
+
+  if ($("#summaryBtn")) {
+    $("#summaryBtn").onclick = generateSummary;
+  }
+
+  if ($("#conversationSearch")) {
+    $("#conversationSearch").oninput = event =>
+      renderConversations(event.target.value);
+  }
+
+  if ($("#menuBtn")) {
+    $("#menuBtn").onclick = () =>
+      $("#sidebar")?.classList.toggle("open");
+  }
+
+  $$("[data-close]").forEach(button => {
+    button.onclick = closeModals;
+  });
+
+  $$(".modal-bg").forEach(background => {
+    background.onclick = event => {
+      if (event.target === background) closeModals();
+    };
+  });
+
+  if ($("#newChatBtn")) {
+    $("#newChatBtn").onclick = openCustomerPicker;
+  }
+
+  $$(".chat-filter").forEach(button => {
+    button.onclick = () => {
+      $$(".chat-filter").forEach(item =>
+        item.classList.remove("active")
+      );
+
+      button.classList.add("active");
+      state.activeChatFilter = button.dataset.filter;
+
+      renderConversations($("#conversationSearch")?.value || "");
+    };
+  });
+
+  loadData();
+}
+
+/* -------------------------------------------------------
+   START APPLICATION
+------------------------------------------------------- */
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initializeApp);
+} else {
+  initializeApp();
+}
+    </script>
 <script async="" defer="" src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAWauYFexFwgqkBHlx5tUwLexTSXNptPtA&amp;callback=initDeliveryMap"></script>
 
 <div id="smartyContainer" style="position: absolute; top: 0px; right: 0px; line-height: initial; z-index: 2147483647; width: auto; font-size: initial; pointer-events: none;"></div>
